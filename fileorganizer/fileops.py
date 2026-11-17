@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import unicodedata
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -98,6 +99,56 @@ def list_folders(root: Path, exclude: Path | None = None) -> list[str]:
             names.append(entry.name)
     names.sort(key=str.lower)
     return names
+
+
+def _fold(text: str) -> str:
+    """Lower case and without accents, so "ano" finds "Año" (S-3). This also makes the two
+    ways macOS can store an accented letter (é, or e + ◌́) compare equal."""
+    decomposed = unicodedata.normalize("NFD", text)
+    return "".join(ch for ch in decomposed if not unicodedata.combining(ch)).casefold()
+
+
+def name_matches(name: str, text: str) -> bool:
+    """True if the folder `name` contains the search `text` (S-3)."""
+    return _fold(text.strip()) in _fold(name)
+
+
+def filter_names(names: list[str], text: str) -> list[str]:
+    """The names that contain `text`: those that start with it first, then the others,
+    each group in the original order (S-3). An empty `text` keeps every name."""
+    query = _fold(text.strip())
+    if not query:
+        return list(names)
+    starts: list[str] = []
+    contains: list[str] = []
+    for name in names:
+        folded = _fold(name)
+        if folded.startswith(query):
+            starts.append(name)
+        elif query in folded:
+            contains.append(name)
+    return starts + contains
+
+
+def existing_folders(paths: list[Path], exclude: Path | None = None, limit: int | None = None) -> list[Path]:
+    """The `paths` that are still folders, in the same order, at most `limit` (RF-4).
+
+    `exclude` is left out, as the source folder is left out of the folder list (F-5).
+    """
+    excluded = _real(exclude) if exclude is not None else None
+    found: list[Path] = []
+    for path in paths:
+        if limit is not None and len(found) >= limit:
+            break
+        try:
+            if not path.is_dir():
+                continue
+        except OSError:
+            continue
+        if excluded is not None and _real(path) == excluded:
+            continue
+        found.append(path)
+    return found
 
 
 def unique_destination(folder: Path, filename: str) -> Path:

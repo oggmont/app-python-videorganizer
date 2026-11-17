@@ -13,6 +13,12 @@ MOVING = "#c77800"     # folder while a move is running (M-6)
 CURSOR = "#ffd479"     # keyboard cursor outline (F-6)
 SEPARATOR = "#2e2e2e"
 HOVER = "#2f2f2f"
+# Recently used folders (RF-2): a violet tint, so they don't look like the plain folder list.
+RECENT_BG = "#2a2633"
+RECENT_HOVER = "#353041"
+RECENT_ACCENT = "#a58cff"
+RECENT_SEPARATOR = "#353042"
+RECENT_HINT = "#9d93b8"
 
 STATUS_COLORS = {
     "muted": MUTED,
@@ -69,7 +75,7 @@ QSlider::handle:horizontal {{
 #logFrame {{ border: 1px solid #353535; border-radius: 4px; background: #1c1c1c; }}
 #logTitle {{
     color: #888888; font-size: 11px; font-weight: 600;
-    padding: 6px 10px; border-bottom: 1px solid #303030;
+    padding: 4px 10px; border-bottom: 1px solid #303030;
 }}
 QTextBrowser#logView {{ background: transparent; border: none; }}
 
@@ -77,6 +83,13 @@ QTextBrowser#logView {{ background: transparent; border: none; }}
 #keyHints {{ background: #222222; border-top: 1px solid #333333; color: #999999; font-size: 12px; }}
 
 QListWidget#folderList {{ background: #262626; border: none; }}
+QListWidget#recentList {{ background: {RECENT_BG}; border: none; }}
+#searchRow {{ border-bottom: 1px solid #333333; }}
+QLineEdit#searchField {{ background: #1a1a1a; border: 1px solid #3d3d3d; border-radius: 6px; padding: 5px 8px; color: #ffffff; }}
+QLineEdit#searchField:focus {{ border-color: #0a84ff; }}
+#recentBox {{ background: {RECENT_BG}; border-bottom: 1px solid #3d3650; }}
+#recentTitle {{ color: {RECENT_ACCENT}; font-size: 11px; font-weight: 600; padding: 6px 14px 4px 14px; }}
+#listTitle {{ color: #888888; font-size: 11px; font-weight: 600; padding: 6px 14px; border-bottom: 1px solid #303030; }}
 QSplitter::handle {{ background: #151515; }}
 QScrollBar:vertical {{ background: #262626; width: 10px; }}
 QScrollBar::handle:vertical {{ background: #4a4a4a; border-radius: 4px; min-height: 30px; }}

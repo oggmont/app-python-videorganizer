@@ -6,9 +6,11 @@ video on the left, pick a folder on the right, and the video is moved there.
 ![Video File Organizer](ui-mockup.png)
 
 - Plays MP4, AVI (Xvid/DivX), MKV, MOV, WMV and more, with nothing else to install.
-- Videos play biggest first and replay until you stop, skip or move them.
-- The whole flow works from the keyboard: **← / →** to pick a video, **↑ / ↓** to pick a folder,
-  **Enter, Enter** to move.
+- Videos play biggest first and replay until you stop, skip or move them. **← / →** go round
+  like a carousel: after the last video comes the first again.
+- The whole flow works from the keyboard: **← / →** to pick a video, type a folder's name (or
+  **↑ / ↓**) to pick a folder, **Enter, Enter** to move.
+- The folders you moved videos into most recently are listed on top, ready to use again.
 - **Undo** (⌘Z) brings back the last moved or deleted video. **Delete** (⌘⌫, press twice)
   moves a video to the macOS Trash.
 - Files are never overwritten or permanently deleted. Every move is checked, and recorded in `moves_log.txt`.
@@ -66,8 +68,8 @@ python3.14 -m venv .venv
 1. **Change source folder** (top left): the folder with the videos to sort.
    Only videos directly inside it are listed; subfolders aren't searched.
 2. **Change** (top right): the folder that contains your destination folders.
-3. Pick a folder: click it once, or move to it with **↑ / ↓** and press **Enter**.
-   It turns blue and the status bar asks you to confirm.
+3. Pick a folder: click it once, or type part of its name (or move to it with **↑ / ↓**) and
+   press **Enter**. It turns blue and the status bar asks you to confirm.
 4. Click it again or press **Enter** again: the video moves there, and the next video starts.
    A double-click does steps 3 and 4 at once.
 5. The folder **stays selected**, so the next video needs only one click or one Enter to go
@@ -75,15 +77,33 @@ python3.14 -m venv .venv
 
 | Key | Action |
 |-----|--------|
-| **→** / **←** | Next video (smaller) / previous video (bigger) |
-| **↓** / **↑** | Move the folder cursor (yellow outline) |
+| *letters, numbers* | Filter the folders (the search field always has the text cursor); **⌫** clears the search |
+| **→** / **←** | Next video (smaller) / previous video (bigger), going round at the ends |
+| **↓** / **↑** | Move the folder cursor (yellow outline), also into the recent folders |
+| **⌥↑** / **⌥↓** | Jump the folder cursor to the top / the bottom |
 | **Enter** | First press selects the folder, second press moves the video |
-| **Esc** | Cancel a pending delete, clear the folder selection, or cancel a rename |
+| **Esc** | Cancel a pending delete, else clear the search, else clear the folder selection; cancels a rename |
 | **⌘↵** | Open the folder under the cursor (list its subfolders) |
 | **⌘↑** | Go to the parent folder |
 | **⌘⇧N** | New folder in the list on the right |
 | **⌘Z** | Undo the last move or delete |
 | **⌘⌫** | Delete: press once to ask, again to move the video to the Trash |
+
+**Search:** the field at the top of the right panel always has the text cursor, so you can
+start typing a folder's name at any moment. The list shows only the folders whose name contains
+what you typed (upper/lower case and accents don't matter), and the cursor jumps to the best
+match, so **Enter, Enter** moves the video there. The arrows, Enter, Esc, ⌘Z and ⌘⌫ keep working
+while you type. After a move the text stays selected: Enter sends the next video to the same
+folder, and typing replaces the text. ⌫ or Esc clears the whole search.
+
+**Recently used:** the violet block above the folder list shows the last 5 folders you moved
+videos into, newest first. They work like any other folder (click, double-click, Enter), also
+when they're somewhere else than the current list, e.g. a subfolder; then the row says where
+(*in Family*). ↑ from the top of the folder list moves the cursor into them. They're remembered
+between launches.
+
+**Log size:** the recent moves log at the bottom left starts small. Drag the divider above it to
+make it taller.
 
 **New folder:** the **New folder** button at the top of the right panel (or **⌘⇧N**) opens a
 name row: type the name, then Enter or **Create**. Esc cancels. The folder is created next to
@@ -103,8 +123,8 @@ brings it back from the Trash.
 **Rename:** press **Change** next to the name, type the new name, then **OK** or Enter.
 Esc cancels. The extension is kept, and an existing file is never overwritten.
 
-**Settings:** the last source and destination folders and the divider position are
-remembered between launches (stored by Qt in `~/Library/Preferences`).
+**Settings:** the last source and destination folders, the recently used folders and the
+divider positions are remembered between launches (stored by Qt in `~/Library/Preferences`).
 
 ## Move log
 

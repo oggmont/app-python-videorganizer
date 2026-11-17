@@ -19,6 +19,9 @@ from fileorganizer.fileops import (
     trash_verified,
     unique_destination,
     create_folder,
+    existing_folders,
+    filter_names,
+    name_matches,
 )
 
 
@@ -231,3 +234,31 @@ def test_create_folder_next_to_a_file_with_that_name(tmp_path):
     write(tmp_path / "Notes", 1)
     with pytest.raises(FolderError, match="already exists"):
         create_folder(tmp_path, "Notes")
+
+
+# -- search (S-3) and recent folders (RF-4) --------------------------------------------------
+def test_filter_names_puts_names_that_start_with_the_text_first():
+    names = ["Animals", "Beach", "Birthdays", "Hiking", "Kids", "Weddings"]
+    assert filter_names(names, "ki") == ["Kids", "Hiking"]
+    assert filter_names(names, "  B ") == ["Beach", "Birthdays"]
+    assert filter_names(names, "") == names
+    assert filter_names(names, "zzz") == []
+
+
+def test_search_ignores_case_and_accents():
+    assert filter_names(["Año 2019", "Cumpleaños", "Sports"], "ano") == ["Año 2019", "Cumpleaños"]
+    assert name_matches("CAFÉ", "cafe") and name_matches("Café", "CAFÉ")
+    # macOS may store "é" as "e" + a combining accent; typing "é" still finds it.
+    assert name_matches("Cafe\u0301 Paris", "café")
+    assert not name_matches("Beach", "x")
+
+
+def test_existing_folders_skips_missing_ones_and_the_excluded_folder(tmp_path):
+    a, b, c, d = (tmp_path / n for n in "abcd")
+    for folder in (a, b, d):
+        folder.mkdir()
+    write(tmp_path / "file", 1)
+    paths = [b, c, tmp_path / "file", a, d]
+    assert existing_folders(paths) == [b, a, d]
+    assert existing_folders(paths, exclude=a) == [b, d]
+    assert existing_folders(paths, limit=2) == [b, a]

@@ -13,7 +13,7 @@ from pathlib import Path
 
 from PySide6.QtCore import QObject, QRunnable, QSettings, Qt, QThreadPool, QTimer, Signal
 from PySide6.QtGui import QGuiApplication, QKeySequence, QShortcut
-from PySide6.QtWidgets import QFileDialog, QMainWindow, QSplitter, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QFileDialog, QMainWindow, QVBoxLayout, QWidget
 
 from .fileops import (
     MoveError,
@@ -23,6 +23,7 @@ from .fileops import (
     TrashFunction,
     Video,
     create_folder,
+    existing_folders,
     list_folders,
     list_videos,
     move_verified,
@@ -30,12 +31,16 @@ from .fileops import (
     trash_verified,
 )
 from .movelog import MoveLog, default_log_path
+from .widgets.common import GripSplitter
 from .widgets.folder_panel import FolderPanel
+from .widgets.log_panel import DEFAULT_HEIGHT as LOG_HEIGHT
 from .widgets.log_panel import LogPanel
 from .widgets.player_panel import PlayerPanel
 from .widgets.status_line import MESSAGE_MS, StatusLine
 
 DELETE_CONFIRM_MS = 5000  # D-5: an unconfirmed delete is cancelled after 5 s
+RECENT_SHOWN = 5  # RF-1
+RECENT_KEPT = 10  # RF-4: a few more are remembered, so 5 are still shown when some folders are gone
 
 
 @dataclass(frozen=True)
@@ -96,6 +101,7 @@ class MainWindow(QMainWindow):
 
         self.source: Path | None = None
         self.dest: Path | None = None
+        self.recent: list[Path] = self._load_recent()  # folders videos were moved into, newest first
         self.videos: list[Video] = []
         self.index = 0
         self.busy = False  # a move, undo or delete is running (M-14)
@@ -116,8 +122,19 @@ class MainWindow(QMainWindow):
 
         log_holder = QWidget()
         log_layout = QVBoxLayout(log_holder)
-        log_layout.setContentsMargins(14, 10, 14, 10)
+        log_margins = (14, 6, 14, 8)
+        log_layout.setContentsMargins(*log_margins)
         log_layout.addWidget(self.log_panel)
+
+        # L-8: a divider between the player and the log. Drag it to make the log bigger.
+        self.left_splitter = GripSplitter(Qt.Orientation.Vertical)
+        self.left_splitter.setHandleWidth(6)
+        self.left_splitter.setChildrenCollapsible(False)
+        self.left_splitter.addWidget(self.player_panel)
+        self.left_splitter.addWidget(log_holder)
+        self.left_splitter.setStretchFactor(0, 1)  # a bigger window makes the video bigger,
+        self.left_splitter.setStretchFactor(1, 0)  # not the log
+        self.left_splitter.setSizes([10_000, LOG_HEIGHT + log_margins[1] + log_margins[3]])
 
         left = QWidget()
         left.setObjectName("leftPanel")
@@ -125,13 +142,12 @@ class MainWindow(QMainWindow):
         left_layout = QVBoxLayout(left)
         left_layout.setContentsMargins(0, 0, 0, 0)
         left_layout.setSpacing(0)
-        left_layout.addWidget(self.player_panel, 1)
-        left_layout.addWidget(log_holder)
+        left_layout.addWidget(self.left_splitter, 1)
         left_layout.addWidget(self.status_line)
 
         # -- right section and divider (L-2, L-3, L-4) ----------------------------
         self.folder_panel = FolderPanel()
-        self.splitter = QSplitter(Qt.Orientation.Horizontal)
+        self.splitter = GripSplitter(Qt.Orientation.Horizontal)
         self.splitter.setHandleWidth(6)
         self.splitter.setChildrenCollapsible(False)
         self.splitter.addWidget(left)
@@ -154,6 +170,7 @@ class MainWindow(QMainWindow):
         self.player_panel.playback_error.connect(lambda text: self.status_line.show_message(text, "error"))
         self.folder_panel.change_dest_clicked.connect(self.choose_dest)
         self.folder_panel.folder_clicked.connect(self._on_folder_clicked)
+        self.folder_panel.filter_changed.connect(self._on_filter_changed)
 
         self._shortcuts: list[QShortcut] = []
         self._add_shortcuts()
@@ -162,6 +179,8 @@ class MainWindow(QMainWindow):
         self._restore_settings()
         self._update_action_buttons()
         self.status_line.show_idle()
+        self.folder_panel.focus_search()  # S-2: typing a folder name works right away
+        QGuiApplication.instance().focusWindowChanged.connect(self._on_focus_window_changed)
 
     # ======================================================================
     # Keyboard (section 8)
@@ -171,6 +190,9 @@ class MainWindow(QMainWindow):
         self._shortcut(["Left"], self.previous_video)
         self._shortcut(["Down"], lambda: self.move_cursor(1), auto_repeat=True)
         self._shortcut(["Up"], lambda: self.move_cursor(-1), auto_repeat=True)
+        # K-15: ⌥↑ / ⌥↓ (Qt's "Alt" is the Option key on macOS) jump to the top or the bottom.
+        self._shortcut(["Alt+Up"], lambda: self.move_cursor(-self.folder_panel.row_count()))
+        self._shortcut(["Alt+Down"], lambda: self.move_cursor(self.folder_panel.row_count()))
         self._shortcut(["Return", "Enter"], self.press_enter)
         self._shortcut(["Escape"], self.press_escape)
         # On macOS, Qt's "Ctrl" is the ⌘ key: ⌘Z and ⌘⌫ (⌘ + forward delete also works).
@@ -191,6 +213,8 @@ class MainWindow(QMainWindow):
             shortcut.setAutoRepeat(auto_repeat)
             shortcut.activated.connect(slot)
             self._shortcuts.append(shortcut)
+            # S-5: the search field holds the text cursor but leaves these keys to the window.
+            self.folder_panel.search_field.add_command_key(QKeySequence(key))
 
     def _on_rename_mode(self, editing: bool) -> None:
         if editing:
@@ -213,14 +237,33 @@ class MainWindow(QMainWindow):
             self.status_line.show_message(prompt, "prompt")
         elif not typing:
             self.status_line.refresh()
+            self.folder_panel.focus_search()  # S-2: the text cursor goes back to the search field
 
     def _cancel_text_edits(self) -> None:
         self.player_panel.cancel_rename()
         self.folder_panel.cancel_new_folder()
 
+    def _on_focus_window_changed(self, focus_window) -> None:
+        """S-2: the video is drawn in a window of its own, inside this one. If it ever takes
+        the focus, typed letters would go nowhere, so give the focus back to the search field.
+        (macOS doesn't focus it, as it ignores input, but some Qt platforms do when it's shown.)"""
+        own = self.windowHandle()
+        if own is None or focus_window is None or focus_window is own:
+            return
+        parent = focus_window.parent()
+        while parent is not None and parent is not own:
+            parent = parent.parent()
+        if parent is own:
+            own.requestActivate()
+            if not (self.player_panel.editing or self.folder_panel.creating):
+                self.folder_panel.focus_search()
+
     def press_escape(self) -> None:
-        """Esc cancels a pending delete first, otherwise clears the folder selection."""
+        """Esc cancels a pending delete first, then clears the search, then the folder selection."""
         if self._cancel_delete("Delete cancelled."):
+            return
+        if self.folder_panel.search_text():
+            self.folder_panel.clear_search()  # S-7
             return
         self.clear_selection()
 
@@ -235,12 +278,13 @@ class MainWindow(QMainWindow):
         video = self.current_video
         if video is None:
             return ("No more videos in this folder.", "muted")
-        if self.dest is None:
-            return ("Choose a destination folder on the right.", "muted")
         armed = self.folder_panel.armed_name()
         if armed:
             return (f"Click or press Enter on “{armed}” to move {video.name}", "prompt")  # M-12b
-        return ("Pick a folder: click it, or use ↑ ↓ and press Enter. Click or Enter again moves the video.", "muted")
+        if self.dest is None:
+            return ("Choose a destination folder on the right.", "muted")
+        return ("Pick a folder: click it, or type its name or use ↑ ↓, then press Enter. "
+                "Click or Enter again moves the video.", "muted")
 
     def _update_action_buttons(self) -> None:
         panel = self.player_panel
@@ -293,6 +337,7 @@ class MainWindow(QMainWindow):
         self._cancel_text_edits()  # R-9, F-12
         self._cancel_delete()
         self.folder_panel.clear_armed()  # M-5
+        self.folder_panel.clear_search()  # S-7: a new list starts unfiltered
         self.dest = path
         if save:
             self.settings.setValue("dest", str(path))
@@ -305,27 +350,49 @@ class MainWindow(QMainWindow):
 
     def _refresh_folders(self, cursor_on: str | None = None) -> str | None:
         self.folder_panel.set_root(self.dest)
+        error = None
         if self.dest is None:
             self.folder_panel.set_folders([], "Choose a destination folder with the Change button above.")
-            return None
-        try:
-            names = list_folders(self.dest, exclude=self.source)
-        except OSError as e:
-            self.folder_panel.set_folders([], "This folder can't be read.")
-            return f"✗ Can't read {self.dest}: {e.strerror or e}"
-        self.folder_panel.set_folders(
-            names, "There are no folders inside this folder. ⌘↑ goes back to the parent folder.", cursor_on
-        )
-        return None
+        else:
+            try:
+                names = list_folders(self.dest, exclude=self.source)
+            except OSError as e:
+                self.folder_panel.set_folders([], "This folder can't be read.")
+                error = f"✗ Can't read {self.dest}: {e.strerror or e}"
+            else:
+                self.folder_panel.set_folders(
+                    names, "There are no folders inside this folder. ⌘↑ goes back to the parent folder.", cursor_on
+                )
+        self.folder_panel.set_recent(self._shown_recent())  # F-5 and RF-4 depend on the source folder
+        return error
+
+    # -- recently used folders (RF-1..RF-8) ---------------------------------------------
+    def _load_recent(self) -> list[Path]:
+        value = self.settings.value("recent_folders")
+        if isinstance(value, str):  # some settings formats return a one-item list as a string
+            value = [value]
+        if not isinstance(value, (list, tuple)):
+            return []
+        return [Path(v) for v in value if isinstance(v, str) and v][:RECENT_KEPT]
+
+    def _shown_recent(self) -> list[Path]:
+        """The 5 newest recent folders that still exist, without the source folder (RF-4)."""
+        return existing_folders(self.recent, exclude=self.source, limit=RECENT_SHOWN)
+
+    def _remember_folder(self, folder: Path) -> None:
+        """RF-3: a video was moved into `folder`, so it goes to the top of the recent folders."""
+        self.recent = [folder, *(p for p in self.recent if p != folder)][:RECENT_KEPT]
+        self.settings.setValue("recent_folders", [str(p) for p in self.recent])
+        self.folder_panel.set_recent(self._shown_recent())
 
     def open_cursor_folder(self) -> None:
         """⌘↵: the folder under the cursor becomes the destination folder (K-12)."""
         if self.busy or self.dest is None:
             return
-        name = self.folder_panel.cursor_name()
-        if name is None:
+        folder = self.folder_panel.cursor_folder()
+        if folder is None:
             return
-        self.set_dest(self.dest / name, cursor_on="")  # start at the top of the new list
+        self.set_dest(folder, cursor_on="")  # start at the top of the new list
 
     def open_parent_folder(self) -> None:
         """⌘↑: the parent folder becomes the destination folder, with the cursor on the
@@ -357,8 +424,10 @@ class MainWindow(QMainWindow):
             return
         self.folder_panel.cancel_new_folder()
         # F-13: the list is reloaded with the cursor on the new folder. Like moving the cursor
-        # with ↑/↓, this clears the selection (K-6); nothing is moved.
+        # with ↑/↓, this clears the selection (K-6); nothing is moved. The search is cleared
+        # so the new folder is in the list (S-7).
         self.folder_panel.clear_armed()
+        self.folder_panel.clear_search()
         error = self._refresh_folders(cursor_on=folder.name)
         if error:
             self.status_line.show_message(error, "error")
@@ -369,6 +438,9 @@ class MainWindow(QMainWindow):
         splitter_state = self.settings.value("splitter")
         if splitter_state:
             self.splitter.restoreState(splitter_state)
+        left_state = self.settings.value("left_splitter")  # L-8: the log's height
+        if left_state:
+            self.left_splitter.restoreState(left_state)
         dest = self.settings.value("dest")
         if dest and Path(dest).is_dir():
             self.set_dest(Path(dest), save=False)
@@ -406,7 +478,8 @@ class MainWindow(QMainWindow):
                     return None
             after = keep.sort_key
         if after is not None:
-            self.index = next((i for i, v in enumerate(self.videos) if v.sort_key > after), len(self.videos))
+            # After the smallest video, start again at the biggest one (M-12, K-3).
+            self.index = next((i for i, v in enumerate(self.videos) if v.sort_key > after), 0)
         else:
             self.index = 0
         return None
@@ -423,32 +496,38 @@ class MainWindow(QMainWindow):
         self._update_action_buttons()
 
     def next_video(self) -> None:
-        """→ and Skip: the next smaller video. The folder selection stays (M-12a, K-4)."""
+        """→ and Skip: the next smaller video. After the smallest, the biggest (K-3)."""
+        self._step_video(1)
+
+    def previous_video(self) -> None:
+        """←: the previous (next bigger) video. Before the biggest, the smallest (K-3)."""
+        self._step_video(-1)
+
+    def _step_video(self, step: int) -> None:
+        """Go round the videos like a carousel (P-11, K-3). The folder selection stays (M-12a, K-4)."""
         if self.busy:
             return
         self._cancel_text_edits()  # R-9, F-12
         self._cancel_delete()  # D-5
-        if self.index >= len(self.videos) - 1:
-            if self.videos:
-                self.status_line.show_message("Last video.", "muted", MESSAGE_MS)  # K-3
+        count = len(self.videos)
+        if count == 0:
             return
-        self.index += 1
+        if self.current_video is None:  # not on a video: start at one end
+            self.index = 0 if step > 0 else count - 1
+            wrapped = False
+        elif count == 1:
+            self.status_line.show_message("This is the only video.", "muted", MESSAGE_MS)
+            return
+        else:
+            previous = self.index
+            self.index = (previous + step) % count
+            wrapped = (self.index < previous) if step > 0 else (self.index > previous)
         self._load_current()
-        self.status_line.refresh()
-
-    def previous_video(self) -> None:
-        """←: the previous (next bigger) video."""
-        if self.busy:
-            return
-        self._cancel_text_edits()
-        self._cancel_delete()
-        if self.index <= 0 or not self.videos:
-            if self.videos:
-                self.status_line.show_message("First video.", "muted", MESSAGE_MS)  # K-3
-            return
-        self.index = min(self.index - 1, len(self.videos) - 1)
-        self._load_current()
-        self.status_line.refresh()
+        if wrapped:
+            where = "first" if step > 0 else "last"
+            self.status_line.show_message(f"↻ Wrapped around to the {where} video.", "muted", MESSAGE_MS)
+        else:
+            self.status_line.refresh()
 
     # ======================================================================
     # Folder cursor and selection (section 4, K-5..K-8)
@@ -458,15 +537,28 @@ class MainWindow(QMainWindow):
             return  # K-10
         self._cancel_delete()
         if self.folder_panel.move_cursor(delta):
-            armed = self.folder_panel.armed_row
-            if armed >= 0 and armed != self.folder_panel.cursor_row():
-                self.folder_panel.clear_armed()  # K-6
+            self._clear_selection_if_cursor_left()  # K-6
             self.status_line.refresh()
 
+    def _clear_selection_if_cursor_left(self) -> None:
+        """K-6: the selection is cleared when the cursor leaves the selected folder. The same
+        folder in the other list (recent folders or all folders) counts as the same folder."""
+        armed = self.folder_panel.armed_folder()
+        if armed is not None and armed != self.folder_panel.cursor_folder():
+            self.folder_panel.clear_armed()
+
+    def _on_filter_changed(self) -> None:
+        """The search text changed and the cursor moved to the best match (S-4)."""
+        if self.busy:
+            return  # the folder being moved into stays selected (M-6)
+        self._cancel_delete()  # D-5
+        self._clear_selection_if_cursor_left()  # K-6
+        self.status_line.refresh()
+
     def press_enter(self) -> None:
-        row = self.folder_panel.cursor_row()
-        if row >= 0:
-            self._activate_folder(row)
+        folder = self.folder_panel.cursor_folder()
+        if folder is not None:
+            self._activate_folder(folder)
 
     def clear_selection(self) -> None:
         if self.busy:
@@ -474,34 +566,32 @@ class MainWindow(QMainWindow):
         self.folder_panel.clear_armed()  # M-5
         self.status_line.show_idle()
 
-    def _on_folder_clicked(self, row: int) -> None:
+    def _on_folder_clicked(self, folder: Path) -> None:
         if self.player_panel.editing or self.folder_panel.creating:
             # R-9, F-12: the click only cancels the typing, so a half-typed name never moves a file.
             what = "Rename" if self.player_panel.editing else "New folder"
             self._cancel_text_edits()
             self.status_line.show_message(f"{what} cancelled.", "muted", MESSAGE_MS)
             return
-        self._activate_folder(row)
+        self._activate_folder(folder)
 
-    def _activate_folder(self, row: int) -> None:
-        """One click or one Enter on folder `row` (M-1..M-4, K-7)."""
+    def _activate_folder(self, folder: Path) -> None:
+        """One click or one Enter on `folder`, in the folder list or the recent folders
+        (M-1..M-4, K-7, RF-6)."""
         if self.busy or self._recently_busy():
             return  # M-14, M-15, K-10
         self._cancel_delete()  # D-5
-        if self.dest is None:
+        if folder == self.folder_panel.armed_folder():
+            self._start_move(folder)
             return
-        name = self.folder_panel.name_at(row)
-        if name is None:
-            return
-        if row == self.folder_panel.armed_row:
-            self._start_move(row)
-            return
-        self.folder_panel.set_armed(row)  # M-1, M-4
+        self.folder_panel.set_armed(folder)  # M-1, M-4
         video = self.current_video
         if video is None:
-            self.status_line.show_message(f"“{name}” selected. There's no video to move.", "muted")
+            self.status_line.show_message(f"“{folder.name}” selected. There's no video to move.", "muted")
         else:
-            self.status_line.show_message(f"Click or press Enter on “{name}” again to move {video.name}", "prompt")
+            self.status_line.show_message(
+                f"Click or press Enter on “{folder.name}” again to move {video.name}", "prompt"
+            )
 
     # ======================================================================
     # File jobs: move, delete and undo all run on a worker thread (M-16)
@@ -561,16 +651,14 @@ class MainWindow(QMainWindow):
             self.status_line.show_message(message, "ok", MESSAGE_MS)  # M-11
 
     # -- move (M-6..M-14) ---------------------------------------------------------------------
-    def _start_move(self, row: int) -> None:
+    def _start_move(self, folder: Path) -> None:
         video = self.current_video
-        name = self.folder_panel.name_at(row)
-        if video is None or name is None or self.dest is None:
+        if video is None:
             self.status_line.show_message("There's no video to move.", "muted", MESSAGE_MS)
             return
-        folder = self.dest / name
         self.folder_panel.set_moving(True)  # M-6
         self._run_job("move", (video, folder), lambda: move_verified(video.path, folder),
-                      f"Moving {video.name} → {name}…")
+                      f"Moving {video.name} → {folder.name}…")
 
     def _finish_move(self, video: Video, folder: Path, destination: Path | None, error: str | None) -> None:
         if error is not None or destination is None:
@@ -584,6 +672,8 @@ class MainWindow(QMainWindow):
         # M-12: the next smaller video plays right away. The folder stays selected (M-12a).
         self._reload_videos(after=video.sort_key)
         self._load_current()
+        self._remember_folder(folder)  # RF-3
+        self.folder_panel.select_search_text()  # S-6
         message = f"✓ Moved {video.name} → {folder.name}"
         if destination.name != video.name:
             message += f" as {destination.name}"  # M-9
@@ -667,9 +757,8 @@ class MainWindow(QMainWindow):
                 error = f"{entry.name} is no longer in {entry.place}"
             if previous is not None:
                 self._reload_videos(keep=previous)
-            else:  # we were on "No more videos", so stay there
+            else:  # the folder was empty ("No more videos")
                 self._reload_videos()
-                self.index = len(self.videos)
             self._load_current()
             self.status_line.show_message(f"✗ Can't undo: {error}", "error")
             return
@@ -717,5 +806,6 @@ class MainWindow(QMainWindow):
             event.ignore()
             return
         self.settings.setValue("splitter", self.splitter.saveState())
+        self.settings.setValue("left_splitter", self.left_splitter.saveState())
         self.player_panel.release()
         super().closeEvent(event)

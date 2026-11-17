@@ -58,9 +58,10 @@ def wait_for_move(window) -> None:
     assert wait_until(lambda: not window.busy, 15), "file operation didn't finish"
 
 
-def _send_mouse(window, name: str, event_types) -> None:
-    lst = window.folder_panel.list
-    row = window.folder_panel.names().index(name)
+def _send_mouse(window, name: str, event_types, recent: bool = False) -> None:
+    panel = window.folder_panel
+    lst = panel.recent_list if recent else panel.list
+    row = (panel.recent_names() if recent else panel.names()).index(name)
     point = lst.visualItemRect(lst.item(row)).center()
     viewport = lst.viewport()
     for event_type in event_types:
@@ -74,6 +75,10 @@ def _send_mouse(window, name: str, event_types) -> None:
 
 def click_folder(window, name: str) -> None:
     _send_mouse(window, name, [QEvent.Type.MouseButtonPress, QEvent.Type.MouseButtonRelease])
+
+
+def click_recent(window, name: str) -> None:
+    _send_mouse(window, name, [QEvent.Type.MouseButtonPress, QEvent.Type.MouseButtonRelease], recent=True)
 
 
 def double_click_folder(window, name: str) -> None:
@@ -111,19 +116,54 @@ def test_videos_play_biggest_first(setup):
 def test_left_right_and_skip_change_video(setup):
     window, source, *_ = setup
     order = expected_order(source)
-    window.previous_video()
-    assert window.current_video.name == order[0]
-    assert window.status_line.text() == "First video."
     window.next_video()
     window.player_panel.skip_button.click()
     assert window.current_video.name == order[2]
     window.previous_video()
     assert window.current_video.name == order[1]
-    for _ in range(10):
-        window.next_video()
-    assert window.current_video.name == order[-1]
-    assert window.status_line.text() == "Last video."
     assert sorted(p.name for p in source.iterdir()) == sorted(order)  # nothing touched on disk
+
+
+def test_left_right_go_round_like_a_carousel(setup):
+    window, source, *_ = setup
+    order = expected_order(source)
+    click_folder(window, "Beach")
+    window.previous_video()  # ← on the first video: the last one (K-3)
+    assert window.current_video.name == order[-1]
+    assert window.player_panel.player.source().toLocalFile().endswith(order[-1])
+    assert window.status_line.text() == "↻ Wrapped around to the last video."
+    window.next_video()  # → on the last video: back to the first
+    assert window.current_video.name == order[0]
+    assert window.status_line.text() == "↻ Wrapped around to the first video."
+    for _ in range(len(order) * 2):  # → never stops
+        window.next_video()
+    assert window.current_video.name == order[0]
+    assert window.folder_panel.armed_name() == "Beach"  # K-4: the selection stays
+
+
+def test_moving_the_smallest_video_goes_on_with_the_biggest(setup):
+    window, source, dest, _ = setup
+    order = expected_order(source)
+    window.next_video()  # skip the biggest one
+    for _ in order[1:]:
+        window._ignore_activations_until = 0
+        if window.folder_panel.armed_name() is None:
+            click_folder(window, "Beach")
+        click_folder(window, "Beach")
+        wait_for_move(window)
+    assert window.current_video.name == order[0]  # M-12: wrapped round to the skipped one
+
+
+def test_only_one_video(setup):
+    window, source, *_ = setup
+    order = expected_order(source)
+    for name in order[1:]:
+        (source / name).unlink()
+    window.set_source(source)
+    window.next_video()
+    window.previous_video()
+    assert window.current_video.name == order[0]
+    assert window.status_line.text() == "This is the only video."
 
 
 # -- move flow (section 4) ------------------------------------------------------------
@@ -626,3 +666,288 @@ def test_new_folder_disabled_without_destination(qapp, tmp_path):
     window.start_new_folder()
     assert not window.folder_panel.creating
     window.deleteLater()
+
+
+# -- search (S-1..S-8) -----------------------------------------------------------------------
+def show_with_focus(window) -> None:
+    """Show the window and wait until the search field holds the text cursor (S-2)."""
+    window.show()
+    window.activateWindow()
+    if not QTest.qWaitForWindowActive(window, 3000):
+        pytest.skip("offscreen platform couldn't activate the window")
+    assert wait_until(lambda: QApplication.focusWidget() is window.folder_panel.search_field, 3)
+
+
+def type_text(text: str) -> None:
+    """Type into whatever has the keyboard focus, as a user would."""
+    QTest.keyClicks(QApplication.focusWidget(), text)
+
+
+def test_typing_filters_the_folders_and_the_keys_still_work(setup):
+    window, source, dest, _ = setup
+    order = expected_order(source)
+    panel = window.folder_panel
+    search = panel.search_field
+    show_with_focus(window)
+
+    type_text("fa")
+    assert search.text() == "fa"
+    assert panel.names() == ["Family"] and panel.cursor_name() == "Family"  # S-3, S-4
+
+    # S-5: the search field has the focus, but these keys still drive the app.
+    QTest.keyClick(search, Qt.Key.Key_Right)
+    assert window.current_video.name == order[1] and search.text() == "fa"
+    QTest.keyClick(search, Qt.Key.Key_Left)
+    assert window.current_video.name == order[0]
+    QTest.keyClick(search, Qt.Key.Key_Return)
+    assert panel.armed_name() == "Family"
+    QTest.keyClick(search, Qt.Key.Key_Return)
+    wait_for_move(window)
+    assert (dest / "Family" / order[0]).exists()
+    assert search.text() == "fa" and search.selectedText() == "fa"  # S-6
+    assert QApplication.focusWidget() is search
+
+    # Typing replaces the selected text. The cursor leaves Family, so it's no longer selected (K-6).
+    type_text("b")
+    assert search.text() == "b" and panel.names() == ["Beach"]
+    assert panel.cursor_name() == "Beach" and panel.armed_name() is None
+
+    window._ignore_activations_until = 0
+    QTest.keyClick(search, Qt.Key.Key_Z, Qt.KeyboardModifier.ControlModifier)  # ⌘Z undoes the move, not the typing
+    wait_for_move(window)
+    assert (source / order[0]).exists() and search.text() == "b"
+
+    QTest.keyClick(search, Qt.Key.Key_Backspace, Qt.KeyboardModifier.ControlModifier)  # ⌘⌫ asks to delete
+    assert window.delete_pending and search.text() == "b"
+    QTest.keyClick(search, Qt.Key.Key_Escape)  # 1st Esc: cancels the delete
+    assert not window.delete_pending and search.text() == "b"
+
+    window._ignore_activations_until = 0
+    QTest.keyClick(search, Qt.Key.Key_Return)
+    assert panel.armed_name() == "Beach"
+    QTest.keyClick(search, Qt.Key.Key_Escape)  # next Esc: clears the search (S-7)...
+    assert search.text() == "" and panel.names() == ["Animals", "Beach", "Family"]
+    assert panel.cursor_name() == "Beach" and panel.armed_name() == "Beach"
+    QTest.keyClick(search, Qt.Key.Key_Escape)  # ...and then the selection
+    assert panel.armed_name() is None
+
+    type_text("x")
+    QTest.keyClick(search, Qt.Key.Key_Backspace)  # a plain ⌫ edits the text
+    assert search.text() == "" and not window.delete_pending
+
+
+def test_search_with_no_match(setup):
+    window, *_ = setup
+    panel = window.folder_panel
+    panel.search_field.setText("zzz")
+    assert panel.names() == [] and panel.cursor_name() is None
+    assert "matches “zzz”" in panel._empty_label.text()
+    window.press_enter()
+    assert panel.armed_name() is None
+
+
+def test_search_is_cleared_when_the_list_changes(setup):
+    window, source, dest, _ = setup
+    panel = window.folder_panel
+    (dest / "Family" / "Kids").mkdir()
+    panel.search_field.setText("fam")
+    window.open_cursor_folder()  # ⌘↵
+    assert window.dest == dest / "Family"
+    assert panel.search_text() == "" and panel.names() == ["Kids"]  # S-7
+
+    panel.search_field.setText("zz")
+    window.start_new_folder()
+    panel.new_folder_field.setText("Zoo")
+    panel.create_button.click()
+    assert panel.search_text() == "" and panel.cursor_name() == "Zoo"  # F-13
+
+
+def test_text_cursor_goes_back_to_the_search_field(setup):
+    window, *_ = setup
+    show_with_focus(window)
+    search = window.folder_panel.search_field
+
+    window.player_panel.rename_change_button.click()
+    assert QApplication.focusWidget() is window.player_panel.rename_field
+    QTest.keyClick(window.player_panel.rename_field, Qt.Key.Key_Escape)
+    assert QApplication.focusWidget() is search
+
+    window.start_new_folder()
+    assert QApplication.focusWidget() is window.folder_panel.new_folder_field
+    window.folder_panel.cancel_new_folder()
+    assert QApplication.focusWidget() is search
+
+    click_folder(window, "Beach")  # clicks and buttons never take the focus
+    window.player_panel.skip_button.click()
+    assert QApplication.focusWidget() is search
+
+
+# -- recently used folders (RF-1..RF-8) ----------------------------------------------------------
+def move_current_to(window, name: str) -> None:
+    window._ignore_activations_until = 0
+    window.folder_panel.clear_armed()
+    double_click_folder(window, name)
+    wait_for_move(window)
+
+
+def test_recent_folders_are_newest_first_and_remembered(setup, tmp_path):
+    window, source, dest, log_path = setup
+    panel = window.folder_panel
+    assert panel.recent_names() == [] and panel._recent_box.isHidden()
+    for name in ["Beach", "Family", "Beach"]:
+        move_current_to(window, name)
+    assert panel.recent_names() == ["Beach", "Family"]  # RF-3: newest first, each folder once
+    assert not panel._recent_box.isHidden()
+
+    window._ignore_activations_until = 0
+    window.undo()  # Undo doesn't change them (RF-3)
+    wait_for_move(window)
+    assert panel.recent_names() == ["Beach", "Family"]
+
+    from fileorganizer.main_window import MainWindow
+
+    settings = QSettings(str(tmp_path / "settings.ini"), QSettings.Format.IniFormat)
+    second = MainWindow(settings=settings, log_path=log_path, trash=fake_trash(tmp_path / ".Trash"))
+    try:
+        assert second.folder_panel.recent_names() == ["Beach", "Family"]  # RF-7
+    finally:
+        second.player_panel.release()
+        second.deleteLater()
+
+
+def test_recent_folders_show_five_that_still_exist(setup):
+    window, source, dest, _ = setup
+    panel = window.folder_panel
+    folders = [dest / f"F{i}" for i in range(7)]
+    for folder in folders:
+        folder.mkdir()
+        window._remember_folder(folder)
+    assert panel.recent_names() == ["F6", "F5", "F4", "F3", "F2"]  # RF-1
+    folders[5].rmdir()
+    window._refresh_folders()
+    assert panel.recent_names() == ["F6", "F4", "F3", "F2", "F1"]  # RF-4
+    window.set_source(folders[4])
+    assert "F4" not in panel.recent_names()  # F-5: never the source folder
+
+
+def test_moving_into_a_recent_folder_from_another_level(setup):
+    window, source, dest, _ = setup
+    order = expected_order(source)
+    panel = window.folder_panel
+    kids = dest / "Family" / "Kids"
+    kids.mkdir()
+    window.set_dest(dest / "Family")
+    move_current_to(window, "Kids")
+
+    window.set_dest(dest)  # Kids isn't in this list, but it's a recent folder
+    assert "Kids" not in panel.names() and panel.recent_names() == ["Kids"]
+    from fileorganizer.widgets.folder_panel import HINT_ROLE
+
+    assert panel.recent_list.item(0).data(HINT_ROLE) == "in Family"  # RF-5
+    window._ignore_activations_until = 0
+    click_recent(window, "Kids")  # RF-6: first click selects...
+    assert panel.armed_folder() == kids and panel.cursor_in_recent()
+    assert (source / order[1]).exists()
+    click_recent(window, "Kids")  # ...second click moves
+    wait_for_move(window)
+    assert (kids / order[1]).exists()
+
+
+def test_cursor_goes_up_into_the_recent_folders(setup):
+    window, source, dest, _ = setup
+    order = expected_order(source)
+    panel = window.folder_panel
+    move_current_to(window, "Animals")
+    assert panel.cursor_name() == "Animals" and not panel.cursor_in_recent()
+
+    window.move_cursor(-1)  # ↑ at the top of the list goes into the recent folders (K-5)
+    assert panel.cursor_in_recent() and panel.cursor_name() == "Animals"
+    assert panel.armed_name() == "Animals"  # the same folder, so it stays selected (K-6)
+    assert not panel.move_cursor(-1)  # the top of the recent folders
+
+    window._ignore_activations_until = 0
+    window.press_enter()  # one Enter moves the next video there (M-12a)
+    wait_for_move(window)
+    assert (dest / "Animals" / order[1]).exists()
+    assert panel.cursor_in_recent()
+
+    window.move_cursor(1)
+    assert not panel.cursor_in_recent() and panel.cursor_name() == "Animals"
+    window.move_cursor(1)
+    assert panel.cursor_name() == "Beach" and panel.armed_name() is None  # K-6
+
+
+def test_search_filters_the_recent_folders_too(setup):
+    window, source, dest, _ = setup
+    panel = window.folder_panel
+    for name in ["Beach", "Family"]:
+        move_current_to(window, name)
+    panel.search_field.setText("fam")
+    assert panel.recent_names() == ["Family"] and panel.names() == ["Family"]
+    assert not panel.cursor_in_recent()  # S-4: the best match in the folder list
+    panel.search_field.setText("zzz")
+    assert panel.recent_names() == [] and panel._recent_box.isHidden()
+
+
+# -- log size (G-1, L-8) ------------------------------------------------------------------------
+def test_log_is_half_as_high_and_its_divider_is_remembered(setup, tmp_path):
+    window, source, dest, log_path = setup
+    window.show()
+    wait_until(lambda: False, 0.1)
+    assert window.log_panel.height() == 75  # G-1: half the old 150 px
+    sizes = window.left_splitter.sizes()
+    window.left_splitter.setSizes([sizes[0] - 100, sizes[1] + 100])
+    assert window.log_panel.height() == 175
+    window.close()  # saves the divider (N-4)
+
+    from fileorganizer.main_window import MainWindow
+
+    settings = QSettings(str(tmp_path / "settings.ini"), QSettings.Format.IniFormat)
+    second = MainWindow(settings=settings, log_path=log_path, trash=fake_trash(tmp_path / ".Trash"))
+    try:
+        second.resize(1400, 900)
+        second.show()
+        wait_until(lambda: False, 0.1)
+        assert second.log_panel.height() == 175
+    finally:
+        second.player_panel.release()
+        second.close()
+        second.deleteLater()
+
+
+# -- delete key in the search (S-9), ⌥↑ / ⌥↓ (K-15) ------------------------------------------------
+@pytest.mark.parametrize("key, modifier", [
+    (Qt.Key.Key_Backspace, Qt.KeyboardModifier.NoModifier),   # ⌫
+    (Qt.Key.Key_Delete, Qt.KeyboardModifier.NoModifier),      # fn ⌫
+    (Qt.Key.Key_Backspace, Qt.KeyboardModifier.AltModifier),  # ⌥⌫
+])
+def test_delete_key_clears_the_whole_search(setup, key, modifier):
+    window, *_ = setup
+    panel = window.folder_panel
+    show_with_focus(window)
+    type_text("fam")
+    assert panel.names() == ["Family"]
+    QTest.keyClick(panel.search_field, key, modifier)
+    assert panel.search_text() == "" and panel.names() == ["Animals", "Beach", "Family"]
+    assert panel.cursor_name() == "Family"  # S-4: the cursor stays on its folder
+    assert not window.delete_pending
+
+
+def test_option_up_and_down_jump_to_the_top_and_bottom(setup):
+    window, *_ = setup
+    panel = window.folder_panel
+    show_with_focus(window)
+    search = panel.search_field
+    alt = Qt.KeyboardModifier.AltModifier  # Qt's Alt is ⌥ on macOS
+
+    QTest.keyClick(search, Qt.Key.Key_Down, alt)
+    assert panel.cursor_name() == "Family"  # the bottom
+    QTest.keyClick(search, Qt.Key.Key_Up, alt)
+    assert panel.cursor_name() == "Animals"  # the top
+
+    move_current_to(window, "Beach")  # now Beach is a recent folder, and selected
+    QTest.keyClick(search, Qt.Key.Key_Down, alt)
+    assert panel.cursor_name() == "Family" and panel.armed_name() is None  # K-6
+    QTest.keyClick(search, Qt.Key.Key_Up, alt)
+    assert panel.cursor_in_recent() and panel.cursor_name() == "Beach"  # the very top (RF-8)
+    assert search.text() == ""  # the keys didn't go into the text

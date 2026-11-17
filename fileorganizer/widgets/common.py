@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QIcon
-from PySide6.QtWidgets import QLabel, QLineEdit, QPushButton, QSizePolicy, QWidget
+from PySide6.QtCore import QRect, Qt, Signal
+from PySide6.QtGui import QColor, QIcon, QPainter
+from PySide6.QtWidgets import QLabel, QLineEdit, QPushButton, QSizePolicy, QSplitter, QSplitterHandle, QWidget
 
 
 def make_button(text: str, icon: QIcon | None = None, small: bool = False, name: str | None = None) -> QPushButton:
@@ -60,6 +60,25 @@ class EditField(QLineEdit):
             self.cancel_requested.emit()
             return
         super().keyPressEvent(event)
+
+
+class _GripHandle(QSplitterHandle):
+    """A divider with a short grip line in the middle, so it's clear it can be dragged."""
+
+    def paintEvent(self, event) -> None:
+        painter = QPainter(self)
+        painter.fillRect(self.rect(), QColor("#151515"))
+        center = self.rect().center()
+        if self.orientation() == Qt.Orientation.Horizontal:
+            grip = QRect(center.x() - 1, center.y() - 20, 2, 40)
+        else:
+            grip = QRect(center.x() - 20, center.y() - 1, 40, 2)
+        painter.fillRect(grip, QColor("#555555"))
+
+
+class GripSplitter(QSplitter):
+    def createHandle(self) -> QSplitterHandle:
+        return _GripHandle(self.orientation(), self)
 
 
 def set_dynamic_property(widget: QWidget, name: str, value) -> None:

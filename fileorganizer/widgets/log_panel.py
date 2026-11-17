@@ -9,12 +9,16 @@ from PySide6.QtWidgets import QFrame, QLabel, QTextBrowser, QVBoxLayout
 
 from ..movelog import PANEL_LIMIT, LogEntry
 
+# G-1: half of the original 150 px. The divider above the log makes it bigger or smaller (L-8).
+DEFAULT_HEIGHT = 75
+MIN_HEIGHT = 48  # the title and one line
+
 
 class LogPanel(QFrame):
     def __init__(self):
         super().__init__()
         self.setObjectName("logFrame")
-        self.setFixedHeight(150)
+        self.setMinimumHeight(MIN_HEIGHT)
         self._entries: list[LogEntry] = []
 
         title = QLabel("RECENT MOVES")
